@@ -164,6 +164,9 @@ impl ChainIndexer {
             });
 
             if is_data_store_reorged {
+                // 1. flush appender
+                // 2. delete reorged blocks from data store
+                // 3. continue
                 todo!("Handle reorg in data store level")
             } else {
                 let idx = block_queue.partition_point(|b| b.number() < incoming_block.number());
@@ -214,28 +217,28 @@ impl ChainIndexer {
                     blocks_in_appender += 1;
                     if blocks_in_appender >= 1000 {
                         block_appender.flush()?;
+
+                        use crate::schema::checkpoints::dsl::*;
+                        let new_checkpoint = NewCheckpoint {
+                            chain_id: self.chain_id as i32,
+                            block_hash: block.hash().encode_hex_with_prefix(),
+                            block_number: block.number() as i32,
+                        };
+                        diesel::insert_into(checkpoints)
+                            .values(&new_checkpoint)
+                            .on_conflict(chain_id)
+                            .do_update()
+                            .set((
+                                block_hash.eq(excluded(block_hash)),
+                                block_number.eq(excluded(block_number)),
+                            ))
+                            .execute(&mut self.db_conn)?;
+
                         blocks_in_appender = 0;
                     }
 
-                    use crate::schema::checkpoints::dsl::*;
-                    let new_checkpoint = NewCheckpoint {
-                        chain_id: self.chain_id as i32,
-                        block_hash: block.hash().encode_hex_with_prefix(),
-                        block_number: block.number() as i32,
-                    };
-                    diesel::insert_into(checkpoints)
-                        .values(&new_checkpoint)
-                        .on_conflict(chain_id)
-                        .do_update()
-                        .set((
-                            block_hash.eq(excluded(block_hash)),
-                            block_number.eq(excluded(block_number)),
-                        ))
-                        .execute(&mut self.db_conn)?;
-
                     debug!("appended block #{}: {:?}", block.number(), block);
                 }
-                // todo: flush the block appender based on number of rows
             }
         }
 

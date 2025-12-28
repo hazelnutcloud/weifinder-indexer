@@ -22,6 +22,7 @@ async fn main() -> anyhow::Result<()> {
         fetcher_max_concurrency: NonZeroUsize::new(100).unwrap(),
         fetcher_max_rps: NonZeroU32::new(100).unwrap(),
         rpc_url: "wss://testnet.riselabs.xyz/ws".to_string(),
+        batch_save_size: NonZeroUsize::new(1000).unwrap(),
     };
 
     info!("settings: {:?}", settings);

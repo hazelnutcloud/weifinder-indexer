@@ -1,9 +1,10 @@
 mod block_fetcher;
+mod block_saver;
 mod head_watcher;
 mod provider;
 
 pub use block_fetcher::*;
-use duckdb::{OptionalExt, params};
+pub use block_saver::*;
 pub use head_watcher::*;
 pub use provider::*;
 
@@ -11,22 +12,22 @@ use std::{collections::VecDeque, num::NonZeroU32};
 
 use alloy::{
     hex::ToHexExt,
-    providers::{Provider, ProviderBuilder, WsConnect},
+    providers::{ProviderBuilder, WsConnect},
     rpc::{client::ClientBuilder, types::Block},
     transports::layers::RetryBackoffLayer,
 };
 
 use crate::settings::Settings;
 
-struct Checkpoint {
+#[derive(Debug, Clone)]
+pub struct Checkpoint {
     block_number: u64,
     block_hash: String,
 }
 
 pub struct ChainIndexer {
-    chain_id: u64,
     block_fetcher: BlockFetcher,
-    data_conn: duckdb::Connection,
+    block_saver: BlockSaver,
 }
 
 impl ChainIndexer {
@@ -50,62 +51,12 @@ impl ChainIndexer {
         )
         .await?;
 
-        let chain_id_ = provider.get_chain_id().await?;
+        let block_saver = BlockSaver::run(provider.clone(), settings.batch_save_size)?;
 
-        let data_conn = duckdb::Connection::open_in_memory()?;
-
-        #[cfg(debug_assertions)]
-        data_conn
-            .execute_batch(
-                r#"
-                INSTALL ducklake;
-                ATTACH 'ducklake:data/data.ducklake' AS data;
-                USE data;
-                "#,
-            )
-            .unwrap();
-
-        let blocks_table = format!("blocks_{}", chain_id_);
-
-        data_conn
-            .execute(
-                &format!(
-                    r#"
-                CREATE TABLE IF NOT EXISTS {blocks_table} (
-                number UINT64 NOT NULL,
-                hash VARCHAR NOT NULL,
-                timestamp UINT64 NOT NULL,
-                parent_hash VARCHAR NOT NULL,
-                gas_used UINT64 NOT NULL,
-                gas_limit UINT64 NOT NULL,
-                );
-                "#,
-                ),
-                [],
-            )
-            .unwrap();
-
-        let last_checkpoint = data_conn
-            .query_row(
-                format!("SELECT number, hash FROM {blocks_table} ORDER BY number DESC LIMIT 1")
-                    .as_str(),
-                [],
-                |row| {
-                    row.get("number").and_then(|number: u64| {
-                        row.get("hash").map(|hash: String| Checkpoint {
-                            block_number: number,
-                            block_hash: hash,
-                        })
-                    })
-                },
-            )
-            .optional()?;
-
-        #[cfg(not(debug_assertions))]
-        todo!("Implement data connection setup for release builds");
+        let last_checkpoint = block_saver.last_saved_checkpoint().await;
 
         let block_fetcher = BlockFetcher::fetch(
-            provider.clone(),
+            provider,
             BlockFetcherParams {
                 max_concurrency: settings.fetcher_max_concurrency,
                 max_rps: settings.fetcher_max_rps,
@@ -119,9 +70,8 @@ impl ChainIndexer {
         .await?;
 
         let mut res = Self {
-            chain_id: chain_id_,
+            block_saver,
             block_fetcher,
-            data_conn,
         };
 
         res.process_blocks(last_checkpoint).await?;
@@ -135,10 +85,6 @@ impl ChainIndexer {
     ) -> Result<(), crate::Error> {
         let rx = self.block_fetcher.receiver();
         let mut block_queue: VecDeque<Block> = VecDeque::new();
-        let mut block_appender = self
-            .data_conn
-            .appender(&format!("blocks_{}", self.chain_id))?;
-        let mut blocks_in_appender = 0;
 
         while let Ok((block_number, block_res)) = rx.recv_async().await {
             let incoming_block = block_res
@@ -173,11 +119,13 @@ impl ChainIndexer {
                 block_queue.insert(idx, incoming_block);
 
                 while let Some(next_block) = block_queue.front() {
+                    let next_block_number = next_block.number();
+
                     let is_next_block = match &last_checkpoint {
                         Some(last_checkpoint) => {
-                            next_block.number() == last_checkpoint.block_number as u64 + 1
+                            next_block_number == last_checkpoint.block_number as u64 + 1
                         }
-                        None => next_block.number() == 0,
+                        None => next_block_number == 0,
                     };
 
                     if !is_next_block {
@@ -186,7 +134,7 @@ impl ChainIndexer {
 
                     let is_reorged_block =
                         last_checkpoint.as_ref().is_some_and(|last_checkpoint| {
-                            last_checkpoint.block_number as u64 == next_block.number()
+                            last_checkpoint.block_number as u64 == next_block_number
                                 || next_block
                                     .header
                                     .parent_hash
@@ -200,25 +148,17 @@ impl ChainIndexer {
                         continue;
                     }
 
-                    last_checkpoint = Some(Checkpoint {
-                        block_number: block.number(),
-                        block_hash: block.hash().encode_hex_with_prefix(),
-                    });
+                    let block_number = block.number();
+                    let block_hash = block.hash().encode_hex_with_prefix();
 
-                    // todo: use insert with data inlining instead when at the tip of the chain
-                    block_appender.append_row(params![
-                        block.number(),
-                        block.hash().encode_hex_with_prefix(),
-                        block.header.timestamp,
-                        block.header.parent_hash.encode_hex_with_prefix(),
-                        block.header.gas_used,
-                        block.header.gas_limit,
-                    ])?;
-                    blocks_in_appender += 1;
-                    if blocks_in_appender >= 1000 {
-                        block_appender.flush()?;
-                        blocks_in_appender = 0;
+                    if let Err(_) = self.block_saver.save_block(block).await {
+                        break;
                     }
+
+                    last_checkpoint = Some(Checkpoint {
+                        block_number: block_number,
+                        block_hash: block_hash,
+                    });
                 }
             }
         }

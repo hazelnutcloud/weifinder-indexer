@@ -4,6 +4,7 @@ use std::num::NonZeroUsize;
 use tracing::info;
 use weifinder_indexer::Settings;
 use weifinder_indexer::indexer::ChainIndexer;
+use weifinder_indexer::tui::TuiExporter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -17,6 +18,7 @@ async fn main() -> anyhow::Result<()> {
     // todo: load settings from file or env
 
     tracing_subscriber::fmt::init();
+    metrics::set_global_recorder(TuiExporter::new())?;
 
     let settings = Settings {
         fetcher_max_concurrency: NonZeroUsize::new(100).unwrap(),

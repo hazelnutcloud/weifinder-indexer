@@ -11,6 +11,7 @@ use alloy::{
 };
 use flume::Receiver;
 use governor::{Quota, RateLimiter};
+use metrics::counter;
 use tokio::sync::Semaphore;
 
 use crate::indexer::provider::IndexerProvider;
@@ -18,7 +19,7 @@ use crate::indexer::provider::IndexerProvider;
 pub struct BlockFetcherParams {
     pub max_concurrency: NonZeroUsize,
     pub max_rps: NonZeroU32,
-    pub start_block: u64,
+    pub start_block: Option<u64>,
 }
 
 impl Default for BlockFetcherParams {
@@ -26,7 +27,7 @@ impl Default for BlockFetcherParams {
         Self {
             max_concurrency: NonZeroUsize::new(100).unwrap(),
             max_rps: NonZeroU32::new(100).unwrap(),
-            start_block: Default::default(),
+            start_block: None,
         }
     }
 }
@@ -47,7 +48,8 @@ impl BlockFetcher {
             let rate_limiter = RateLimiter::direct(Quota::per_second(params.max_rps));
 
             let mut current_head = provider.current_head().clone();
-            let mut fetching_block_number = params.start_block;
+            let mut fetching_block_number = params.start_block.unwrap_or(0);
+            let last_fetched_block_counter = counter!("indexer_last_fetched_block");
 
             loop {
                 let (current_head_number, is_new_head) = {
@@ -92,6 +94,8 @@ impl BlockFetcher {
 
                     drop(permit)
                 });
+
+                last_fetched_block_counter.absolute(fetching_block_number);
 
                 fetching_block_number += 1;
             }

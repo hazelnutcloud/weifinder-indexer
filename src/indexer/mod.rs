@@ -11,8 +11,9 @@ pub use provider::*;
 use std::{collections::VecDeque, num::NonZeroU32};
 
 use alloy::{
+    eips::BlockNumberOrTag,
     hex::ToHexExt,
-    providers::{ProviderBuilder, WsConnect},
+    providers::{Provider, ProviderBuilder, WsConnect},
     rpc::{client::ClientBuilder, types::Block},
     transports::layers::RetryBackoffLayer,
 };
@@ -60,11 +61,7 @@ impl ChainIndexer {
             BlockFetcherParams {
                 max_concurrency: settings.fetcher_max_concurrency,
                 max_rps: settings.fetcher_max_rps,
-                start_block: last_checkpoint
-                    .as_ref()
-                    .map(|c| c.block_number)
-                    .unwrap_or(0) as u64
-                    + 1,
+                start_block: last_checkpoint.as_ref().map(|c| c.block_number + 1),
             },
         )
         .await?;
@@ -94,19 +91,18 @@ impl ChainIndexer {
                 })?
                 .ok_or(crate::Error::MissingBlock(block_number))?;
 
-            let is_data_store_reorged = last_checkpoint.as_ref().is_some_and(|last_checkpoint| {
-                let last_block_number = last_checkpoint.block_number as u64;
-                let incoming_block_hash = incoming_block.hash().encode_hex_with_prefix();
+            let incoming_block_number = incoming_block.number();
+            let incoming_block_hash = incoming_block.hash().encode_hex_with_prefix();
 
-                if incoming_block.number() == last_block_number
-                    && incoming_block_hash.ne(&last_checkpoint.block_hash)
-                {
-                    true
-                } else if incoming_block.number() < last_block_number {
-                    true
-                } else {
-                    false
-                }
+            if last_checkpoint.as_ref().is_some_and(|last_checkpoint| {
+                last_checkpoint.block_number == incoming_block_number
+                    && last_checkpoint.block_hash == incoming_block_hash
+            }) {
+                continue;
+            }
+
+            let is_data_store_reorged = last_checkpoint.as_ref().is_some_and(|last_checkpoint| {
+                incoming_block_number <= last_checkpoint.block_number
             });
 
             if is_data_store_reorged {
@@ -120,6 +116,7 @@ impl ChainIndexer {
 
                 while let Some(next_block) = block_queue.front() {
                     let next_block_number = next_block.number();
+                    let next_block_hash = next_block.hash().encode_hex_with_prefix();
 
                     let is_next_block = match &last_checkpoint {
                         Some(last_checkpoint) => {
@@ -148,16 +145,13 @@ impl ChainIndexer {
                         continue;
                     }
 
-                    let block_number = block.number();
-                    let block_hash = block.hash().encode_hex_with_prefix();
-
                     if let Err(_) = self.block_saver.save_block(block).await {
                         break;
                     }
 
                     last_checkpoint = Some(Checkpoint {
-                        block_number: block_number,
-                        block_hash: block_hash,
+                        block_number: next_block_number,
+                        block_hash: next_block_hash,
                     });
                 }
             }

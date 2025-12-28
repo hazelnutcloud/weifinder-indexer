@@ -3,6 +3,7 @@ use alloy::{
     providers::{Provider, RootProvider},
     rpc::types::Header,
 };
+use metrics::counter;
 use tokio::sync::watch;
 use tracing::error;
 
@@ -13,11 +14,13 @@ pub struct ChainHeadWatcher {
 
 impl ChainHeadWatcher {
     pub async fn watch(provider: RootProvider) -> Result<Self, crate::error::Error> {
+        let current_head_counter = counter!("indexer_current_head_number");
         let current_head = provider
             .get_block(BlockId::latest())
             .await?
             .expect("latest block to exist")
             .header;
+        current_head_counter.absolute(current_head.number);
 
         let mut sub = provider.subscribe_blocks().await?;
 
@@ -25,6 +28,7 @@ impl ChainHeadWatcher {
 
         tokio::spawn(async move {
             while let Ok(header) = sub.recv().await {
+                current_head_counter.absolute(header.number);
                 tx.send(header).ok();
             }
 

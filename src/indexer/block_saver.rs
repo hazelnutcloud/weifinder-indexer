@@ -3,6 +3,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 use alloy::{hex::ToHexExt, rpc::types::Block};
 use duckdb::{OptionalExt, params};
 use flume::{SendError, Sender};
+use metrics::counter;
 use tokio::sync::RwLock;
 use tracing::error;
 
@@ -82,6 +83,7 @@ impl BlockSaver {
 
             let batch_size = batch_save_size.get();
             let mut blocks_in_appender = 0;
+            let last_saved_block_counter = counter!("indexer_last_saved_block");
 
             while let Ok(block) = rx.recv() {
                 // todo: use insert with data inlining instead when at the tip of the chain
@@ -104,6 +106,7 @@ impl BlockSaver {
                         error!("Failed to flush block appender: {}", err);
                         break;
                     }
+                    last_saved_block_counter.absolute(block.number());
                     blocks_in_appender = 0;
                 }
             }

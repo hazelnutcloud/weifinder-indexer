@@ -98,8 +98,8 @@ impl Stats {
             let mut rate_state = self.rate_state.lock().unwrap();
             let elapsed = rate_state.last_sample_time.elapsed().as_secs_f64();
 
-            // Only recalculate if at least 5 seconds has passed
-            if elapsed >= 3.0 {
+            // Only recalculate if at least 1 second has passed
+            if elapsed >= 1.0 {
                 let prev_fetched_block = if rate_state.prev_fetched_block == 0 {
                     current_fetched
                 } else {

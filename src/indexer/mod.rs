@@ -43,7 +43,7 @@ impl ChainIndexer {
                     .unwrap()
                     .get() as u64,
             ))
-            .ws(WsConnect::new(&settings.rpc_url))
+            .ws(WsConnect::new(&settings.rpc_ws))
             .await?;
         let provider = IndexerProvider::new(
             ProviderBuilder::new()

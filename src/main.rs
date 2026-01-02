@@ -1,6 +1,7 @@
-use std::num::NonZeroU32;
-use std::num::NonZeroUsize;
+use std::path::PathBuf;
 
+use clap::Parser;
+use metrics_exporter_prometheus::PrometheusBuilder;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -9,26 +10,42 @@ use weifinder_indexer::Settings;
 use weifinder_indexer::indexer::ChainIndexer;
 use weifinder_indexer::tui::TuiExporter;
 
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct CliArgs {
+    #[arg(short, long, default_value = "indexer.toml")]
+    config: PathBuf,
+    #[arg(long)]
+    headless: bool,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tui_logger::init_logger(log::LevelFilter::Trace)?;
+    let cli_args = CliArgs::parse();
 
-    // Set up tracing with tui-logger layer
-    tracing_subscriber::registry()
-        .with(tui_logger::TuiTracingSubscriberLayer)
-        .with(EnvFilter::from_default_env())
-        .init();
+    if cli_args.headless {
+        tracing_subscriber::fmt::init();
+        PrometheusBuilder::new().install()?;
+    } else {
+        tui_logger::init_logger(log::LevelFilter::Trace)?;
+        tracing_subscriber::registry()
+            .with(tui_logger::TuiTracingSubscriberLayer)
+            .with(EnvFilter::from_default_env())
+            .init();
+        metrics::set_global_recorder(TuiExporter::new())?;
+    }
 
-    metrics::set_global_recorder(TuiExporter::new())?;
+    let settings: Settings = config::Config::builder()
+        .add_source(config::File::from(cli_args.config))
+        .add_source(config::Environment::with_prefix("INDEXER"))
+        .set_default("fetcher_max_concurrency", 100)?
+        .set_default("fetcher_max_rps", 100)?
+        .set_default("rpc_ws", "wss://testnet.riselabs.xyz/ws")?
+        .set_default("batch_save_size", 1000)?
+        .build()?
+        .try_deserialize()?;
 
-    let settings = Settings {
-        fetcher_max_concurrency: NonZeroUsize::new(100).unwrap(),
-        fetcher_max_rps: NonZeroU32::new(100).unwrap(),
-        rpc_url: "wss://testnet.riselabs.xyz/ws".to_string(),
-        batch_save_size: NonZeroUsize::new(1000).unwrap(),
-    };
-
-    info!("settings: {:?}", settings);
+    info!("Starting indexer with settings:\n{:?}", settings);
 
     ChainIndexer::run(&settings).await?;
 

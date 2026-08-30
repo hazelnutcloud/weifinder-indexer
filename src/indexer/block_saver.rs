@@ -65,6 +65,15 @@ impl BlockSaver {
         let is_remote = !s3_endpoint.starts_with("localhost");
         let batch_size = batch_save_size.get();
 
+        // DuckDB does not accept bind parameters in `CREATE SECRET` / `ATTACH`, so these
+        // values have to be interpolated. Escape embedded quotes so that a credential or
+        // URL containing `'` cannot terminate the literal and inject further statements.
+        let s3_endpoint = escape_sql_literal(s3_endpoint);
+        let s3_access_key_id = escape_sql_literal(s3_access_key_id);
+        let s3_secret_access_key = escape_sql_literal(s3_secret_access_key);
+        let s3_bucket = escape_sql_literal(s3_bucket);
+        let catalog_db_url = escape_sql_literal(catalog_db_url);
+
         data_conn.execute_batch(&format!(
             r#"
                     CREATE OR REPLACE SECRET secret (
@@ -207,9 +216,11 @@ impl BlockSaver {
                             block.header.parent_hash.as_slice(),
                             block.header.gas_used,
                             block.header.gas_limit,
+                            // The appender is positional: this order must match the
+                            // `blocks` table declaration above.
                             block.header.transactions_root.as_slice(),
-                            block.header.receipts_root.as_slice(),
                             block.header.state_root.as_slice(),
+                            block.header.receipts_root.as_slice(),
                             block.header.size.as_ref().map(|size| size.to_string())
                         ])?;
 
@@ -386,7 +397,7 @@ impl BlockSaver {
                                 DELETE FROM inner_transactions
                                 WHERE block_number >= $1
                             "#,
-                            [],
+                            [new_block_number],
                         )?;
                         data_conn.execute(
                             r#"
@@ -445,3 +456,8 @@ impl BlockSaver {
 }
 
 const CHECKPOINT_MIGRATIONS: EmbeddedMigrations = embed_migrations!();
+
+/// Escapes a value that has to be embedded in a single-quoted SQL literal.
+fn escape_sql_literal(value: &str) -> String {
+    value.replace('\'', "''")
+}
